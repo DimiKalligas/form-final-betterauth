@@ -1,0 +1,78 @@
+"use server";
+
+import { ActionResponse, signUpSchema, TSignUpSchema } from "@/lib/types";
+// import { authClient } from "@/lib/auth-client"; 
+import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { PrismaClient } from "../generated/prisma/client";
+import bcrypt from "bcryptjs"
+import { Resend } from "resend";
+
+const adapter = new PrismaBetterSqlite3({ url: `${process.env.DATABASE_URL}` });
+const prisma = new PrismaClient({ adapter });
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+export async function signUpUser(data: TSignUpSchema): Promise<ActionResponse> {
+  // 1. Validation
+  const result = signUpSchema.safeParse(data);
+  if (!result.success) {
+    return { 
+      success: false,
+      message: "Validation failed", 
+      errors: result.error.flatten().fieldErrors };
+  }
+
+  const { email, password } = result.data;
+  // 12 rounds is a good balance of speed/security
+  // const hashedPassword = await bcrypt.hash(password, 12);
+
+  // 2. Database Operation
+  try {
+    await prisma.user.create({
+      data: { 
+        email, 
+        password }, // password: hashedPassword,
+    });
+  } catch (error: any) {
+    // Check for Prisma unique constraint error (P2002)
+    if (error.code === 'P2002') {
+      return { 
+        success: false, 
+        message: "Email already exists.",
+        errors: { email: ["This email is already registered."] } 
+      };
+    }
+    return { 
+      success: false, 
+      message: "Database connection failed.",
+      errors: { root: ["This email is already registered."] }  
+   };
+  }
+
+  // 3. Email Operation (Only happens if DB write succeeded)
+  try {
+    const { error: emailError } = await resend.emails.send({
+      from: "onboarding@resend.dev",
+      to: 'net.logix@yahoo.gr',
+      subject: "Welcome!",
+      html: `<strong>Welcome ${email}!</strong>`,
+    });
+
+    if (emailError) {
+      // We return success: true because the user WAS created, 
+      // but we add a warning about the email.
+      return { 
+        success: true, 
+        message: "User created, but welcome email failed to send.",
+        warning: "Account created, but welcome email failed to send." };
+    }
+  } catch (err) {
+    return { 
+      success: true, 
+      message: "User created, but welcome email service is down.",
+      warning: "Email service is currently down." };
+  }
+
+  return { 
+    success: true,
+    message: "Registration successful! Welcome email sent."};
+}
